@@ -2,6 +2,7 @@ use std::{
     fs::OpenOptions,
     io::{BufRead, BufReader, Write},
     net::{SocketAddr, TcpStream},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::Duration,
@@ -75,20 +76,12 @@ impl ProxyManager {
         let log_path = config::proxy_log_path(app)?;
         config::clear_log_file(&log_path)?;
 
-        let mut command = Command::new(&runtime_status.python_path);
-        command
-            .args([
-                "-m",
-                "litellm",
-                "--config",
-                yaml_path
-                    .to_str()
-                    .context("LiteLLM 配置路径包含非法字符")?,
-                "--port",
-                &config.settings.port.to_string(),
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut command = build_litellm_command(
+            Path::new(&runtime_status.python_path),
+            &yaml_path,
+            config.settings.port,
+        )?;
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = command.spawn().with_context(|| {
             format!(
@@ -239,6 +232,31 @@ fn port_is_open(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
 }
 
+fn build_litellm_command(python_path: &Path, yaml_path: &Path, port: u16) -> Result<Command> {
+    let yaml = yaml_path.to_str().context("LiteLLM 配置路径包含非法字符")?;
+    let port_string = port.to_string();
+    let litellm_path = litellm_command_path(python_path);
+
+    if litellm_path.exists() {
+        let mut command = Command::new(litellm_path);
+        command.args(["--config", yaml, "--port", &port_string]);
+        return Ok(command);
+    }
+
+    let mut command = Command::new(python_path);
+    command.args(["-m", "litellm", "--config", yaml, "--port", &port_string]);
+    Ok(command)
+}
+
+fn litellm_command_path(python_path: &Path) -> PathBuf {
+    let executable = if cfg!(windows) { "litellm.exe" } else { "litellm" };
+
+    python_path
+        .parent()
+        .map(|dir| dir.join(executable))
+        .unwrap_or_else(|| PathBuf::from(executable))
+}
+
 fn chrono_like_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -250,7 +268,9 @@ fn chrono_like_now() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{port_is_open, ProxyManager};
+    use std::path::Path;
+
+    use super::{litellm_command_path, port_is_open, ProxyManager};
 
     #[test]
     fn starts_with_stopped_status() {
@@ -264,5 +284,15 @@ mod tests {
     #[test]
     fn reports_closed_port_as_unhealthy() {
         assert!(!port_is_open(9));
+    }
+
+    #[test]
+    fn prefers_venv_litellm_executable_on_unix() {
+        let python_path = Path::new("/tmp/runtime/.venv/bin/python");
+
+        assert_eq!(
+            litellm_command_path(python_path),
+            Path::new("/tmp/runtime/.venv/bin/litellm")
+        );
     }
 }

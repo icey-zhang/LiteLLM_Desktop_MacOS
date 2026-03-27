@@ -253,9 +253,9 @@ export function ConfigPanel({
                     />
                   </div>
                   <div className="field">
-                    <span>LiteLLM 路径</span>
+                    <span>LiteLLM 路由路径 (格式: 供应商/模型)</span>
                     <input
-                      placeholder="openai/gpt-4"
+                      placeholder="例如: openai/gpt-4o 或 anthropic/claude-3-5-sonnet"
                       value={model.litellmModel}
                       onChange={(event) =>
                         onChange({
