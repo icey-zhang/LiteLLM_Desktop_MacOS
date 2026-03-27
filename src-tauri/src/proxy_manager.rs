@@ -237,12 +237,19 @@ fn build_litellm_command(python_path: &Path, yaml_path: &Path, port: u16) -> Res
     if litellm_path.exists() {
         let mut command = Command::new(litellm_path);
         command.args(["--config", yaml, "--port", &port_string]);
+        sanitize_litellm_command_env(&mut command);
         return Ok(command);
     }
 
     let mut command = Command::new(python_path);
     command.args(["-m", "litellm", "--config", yaml, "--port", &port_string]);
+    sanitize_litellm_command_env(&mut command);
     Ok(command)
+}
+
+fn sanitize_litellm_command_env(command: &mut Command) {
+    command.env_remove("DEBUG");
+    command.env_remove("DETAILED_DEBUG");
 }
 
 fn litellm_command_path(python_path: &Path) -> PathBuf {
@@ -279,8 +286,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        litellm_command_path, port_is_open, resolve_start_timeout_state, ProxyManager,
-        ProxyStatus,
+        build_litellm_command, litellm_command_path, port_is_open, resolve_start_timeout_state,
+        ProxyManager, ProxyStatus,
     };
 
     #[test]
@@ -322,5 +329,22 @@ mod tests {
 
         assert_eq!(status.state, "starting");
         assert!(status.last_error.is_none());
+    }
+
+    #[test]
+    fn strips_debug_env_vars_from_litellm_command() {
+        let python_path = Path::new("/tmp/runtime/.venv/bin/python");
+        let yaml_path = Path::new("/tmp/runtime/litellm-config.yaml");
+        let command = build_litellm_command(python_path, yaml_path, 4000).unwrap();
+        let envs = command.get_envs().collect::<Vec<_>>();
+
+        assert!(
+            envs.iter()
+                .any(|entry| entry.0 == "DEBUG" && entry.1.is_none())
+        );
+        assert!(
+            envs.iter()
+                .any(|entry| entry.0 == "DETAILED_DEBUG" && entry.1.is_none())
+        );
     }
 }
