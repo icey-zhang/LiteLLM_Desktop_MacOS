@@ -15,6 +15,9 @@ use crate::{
     logs::{sanitize_log_line, LogEntry},
 };
 
+const MIN_PYTHON_MAJOR: u32 = 3;
+const MIN_PYTHON_MINOR: u32 = 10;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatus {
@@ -50,6 +53,31 @@ pub fn get_runtime_status(app: &AppHandle) -> Result<RuntimeStatus> {
             version: None,
             hint: Some("建议重新修复运行环境。".to_string()),
         });
+    }
+
+    let python_version_output = Command::new(python_path.as_path())
+        .arg("--version")
+        .output()?;
+    let python_version_text = String::from_utf8_lossy(
+        if python_version_output.stdout.is_empty() {
+            &python_version_output.stderr
+        } else {
+            &python_version_output.stdout
+        },
+    )
+    .trim()
+    .to_string();
+    if let Some(version) = parse_python_version(&python_version_text) {
+        if !is_supported_python_version(version) {
+            return Ok(RuntimeStatus {
+                state: "error".to_string(),
+                detail: format!("运行环境 Python 版本过低: {}", python_version_text),
+                python_path: python_path.to_string_lossy().into_owned(),
+                runtime_dir: runtime_dir.to_string_lossy().into_owned(),
+                version: None,
+                hint: Some("需要 Python 3.10+，应用会尝试重建运行环境。".to_string()),
+            });
+        }
     }
 
     // Use a simple version check that doesn't stream for status check
@@ -115,9 +143,13 @@ pub fn bootstrap_runtime(app: &AppHandle) -> Result<RuntimeStatus> {
     }
 
     fs::create_dir_all(&runtime_root).context("无法创建 runtime 根目录")?;
-    
-    // Use the new streaming command runner
-    run_command_streaming(app, Path::new("python3"), &["-m", "venv", path_str(&runtime_venv)?])?;
+
+    let system_python = resolve_system_python()?;
+    run_command_streaming(
+        app,
+        Path::new(&system_python),
+        &["-m", "venv", path_str(&runtime_venv)?],
+    )?;
 
     emit_runtime_status(
         app,
@@ -247,9 +279,73 @@ fn extract_version(output: &str) -> Option<String> {
         .find_map(|line| line.strip_prefix("Version: ").map(|value| value.to_string()))
 }
 
+fn parse_python_version(output: &str) -> Option<(u32, u32)> {
+    let version = output.strip_prefix("Python ")?;
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+fn is_supported_python_version(version: (u32, u32)) -> bool {
+    version.0 > MIN_PYTHON_MAJOR
+        || (version.0 == MIN_PYTHON_MAJOR && version.1 >= MIN_PYTHON_MINOR)
+}
+
+fn pick_python_command(candidates: &[(&str, Option<(u32, u32)>)]) -> Option<String> {
+    candidates.iter().find_map(|(command, version)| {
+        version
+            .filter(|version| is_supported_python_version(*version))
+            .map(|_| (*command).to_string())
+    })
+}
+
+fn resolve_system_python() -> Result<String> {
+    let candidates = [
+        "/opt/homebrew/bin/python3.13",
+        "/opt/homebrew/bin/python3.12",
+        "/opt/homebrew/bin/python3.11",
+        "/opt/homebrew/bin/python3.10",
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3.13",
+        "/usr/local/bin/python3.12",
+        "/usr/local/bin/python3.11",
+        "/usr/local/bin/python3.10",
+        "/usr/local/bin/python3",
+        "python3.13",
+        "python3.12",
+        "python3.11",
+        "python3.10",
+        "python3",
+    ];
+
+    let probed = candidates
+        .iter()
+        .map(|candidate| {
+            let output = Command::new(candidate).arg("--version").output().ok();
+            let version = output.as_ref().and_then(|output| {
+                if !output.status.success() {
+                    return None;
+                }
+                let text = if output.stdout.is_empty() {
+                    String::from_utf8_lossy(&output.stderr).into_owned()
+                } else {
+                    String::from_utf8_lossy(&output.stdout).into_owned()
+                };
+                parse_python_version(text.trim())
+            });
+            (*candidate, version)
+        })
+        .collect::<Vec<_>>();
+
+    pick_python_command(&probed).context("未找到可用的 Python 3.10+ 解释器")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::extract_version;
+    use super::{
+        extract_version, is_supported_python_version, parse_python_version, pick_python_command,
+    };
 
     #[test]
     fn extracts_version_from_pip_output() {
@@ -260,5 +356,29 @@ mod tests {
     #[test]
     fn returns_none_when_version_is_missing() {
         assert!(extract_version("Name: litellm").is_none());
+    }
+
+    #[test]
+    fn parses_python_major_minor_version() {
+        assert_eq!(parse_python_version("Python 3.13.11"), Some((3, 13)));
+        assert_eq!(parse_python_version("Python 3.9.6"), Some((3, 9)));
+    }
+
+    #[test]
+    fn rejects_python_39_for_runtime() {
+        assert!(!is_supported_python_version((3, 9)));
+        assert!(is_supported_python_version((3, 10)));
+        assert!(is_supported_python_version((3, 13)));
+    }
+
+    #[test]
+    fn picks_first_supported_python_candidate() {
+        let selected = pick_python_command(&[
+            ("python3", Some((3, 9))),
+            ("/opt/homebrew/bin/python3.13", Some((3, 13))),
+            ("/usr/bin/python3", Some((3, 9))),
+        ]);
+
+        assert_eq!(selected.as_deref(), Some("/opt/homebrew/bin/python3.13"));
     }
 }

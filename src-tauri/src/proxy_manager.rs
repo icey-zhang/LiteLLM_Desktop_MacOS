@@ -76,6 +76,12 @@ impl ProxyManager {
         let log_path = config::proxy_log_path(app)?;
         config::clear_log_file(&log_path)?;
 
+        if port_is_open(config.settings.port) {
+            adopt_existing_proxy(&mut self.status, config.settings.port);
+            emit_system_log(app, "检测到目标端口已有 LiteLLM 代理，复用现有实例。");
+            return Ok(self.status.clone());
+        }
+
         let mut command = build_litellm_command(
             Path::new(&runtime_status.python_path),
             &yaml_path,
@@ -272,6 +278,15 @@ fn resolve_start_timeout_state(status: &mut ProxyStatus, child_running: bool) {
     status.last_error = Some("LiteLLM 启动失败，请查看日志面板。".to_string());
 }
 
+fn adopt_existing_proxy(status: &mut ProxyStatus, port: u16) {
+    status.state = "running".to_string();
+    status.pid = None;
+    status.port = port;
+    status.endpoint = format!("http://127.0.0.1:{}", port);
+    status.healthy = true;
+    status.last_error = None;
+}
+
 fn chrono_like_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -286,8 +301,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        build_litellm_command, litellm_command_path, port_is_open, resolve_start_timeout_state,
-        ProxyManager, ProxyStatus,
+        adopt_existing_proxy, build_litellm_command, litellm_command_path, port_is_open,
+        resolve_start_timeout_state, ProxyManager, ProxyStatus,
     };
 
     #[test]
@@ -346,5 +361,26 @@ mod tests {
             envs.iter()
                 .any(|entry| entry.0 == "DETAILED_DEBUG" && entry.1.is_none())
         );
+    }
+
+    #[test]
+    fn marks_existing_port_as_running_without_spawning_new_process() {
+        let mut status = ProxyStatus {
+            state: "stopped".to_string(),
+            pid: None,
+            port: 0,
+            endpoint: String::new(),
+            healthy: false,
+            last_error: Some("old".to_string()),
+        };
+
+        adopt_existing_proxy(&mut status, 4000);
+
+        assert_eq!(status.state, "running");
+        assert_eq!(status.port, 4000);
+        assert_eq!(status.endpoint, "http://127.0.0.1:4000");
+        assert!(status.healthy);
+        assert!(status.pid.is_none());
+        assert!(status.last_error.is_none());
     }
 }
