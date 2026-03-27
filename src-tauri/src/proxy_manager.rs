@@ -121,10 +121,7 @@ impl ProxyManager {
             }
         }
 
-        self.status.state = "error".to_string();
-        self.status.last_error = Some(
-            "LiteLLM 进程已启动，但端口在 5 秒内未就绪，请查看日志面板。".to_string(),
-        );
+        resolve_start_timeout_state(&mut self.status, self.child.is_some());
         Ok(self.status.clone())
     }
 
@@ -257,6 +254,17 @@ fn litellm_command_path(python_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(executable))
 }
 
+fn resolve_start_timeout_state(status: &mut ProxyStatus, child_running: bool) {
+    if child_running {
+        status.state = "starting".to_string();
+        status.last_error = None;
+        return;
+    }
+
+    status.state = "error".to_string();
+    status.last_error = Some("LiteLLM 启动失败，请查看日志面板。".to_string());
+}
+
 fn chrono_like_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -270,7 +278,10 @@ fn chrono_like_now() -> String {
 mod tests {
     use std::path::Path;
 
-    use super::{litellm_command_path, port_is_open, ProxyManager};
+    use super::{
+        litellm_command_path, port_is_open, resolve_start_timeout_state, ProxyManager,
+        ProxyStatus,
+    };
 
     #[test]
     fn starts_with_stopped_status() {
@@ -294,5 +305,22 @@ mod tests {
             litellm_command_path(python_path),
             Path::new("/tmp/runtime/.venv/bin/litellm")
         );
+    }
+
+    #[test]
+    fn keeps_starting_state_if_process_is_still_alive_after_timeout() {
+        let mut status = ProxyStatus {
+            state: "starting".to_string(),
+            pid: Some(42),
+            port: 4000,
+            endpoint: "http://127.0.0.1:4000".to_string(),
+            healthy: false,
+            last_error: None,
+        };
+
+        resolve_start_timeout_state(&mut status, true);
+
+        assert_eq!(status.state, "starting");
+        assert!(status.last_error.is_none());
     }
 }
